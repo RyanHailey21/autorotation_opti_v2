@@ -117,8 +117,8 @@ def _prandtl_loss_cs(blades, r, radius, rhub, phi):
     f_hub = (blades / 2.0) * (r - rhub) / (r * sphi + 1e-6)
     f_tip = cs.fmax(f_tip, 0.0)
     f_hub = cs.fmax(f_hub, 0.0)
-    f_tip_val = 1.0 - cs.exp(-f_tip)
-    f_hub_val = 1.0 - cs.exp(-f_hub)
+    f_tip_val = (2.0/np.pi)*cs.acos(cs.exp(-f_tip))
+    f_hub_val = (2.0/np.pi)*cs.acos(cs.exp(-f_hub)
     return _casadi_clip(f_tip_val * f_hub_val, 1e-3, 1.0)
 
 
