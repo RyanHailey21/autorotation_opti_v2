@@ -562,7 +562,6 @@ def optimize(iters: int, seed: int, args):
     best_design = None
     best_result = None
     best_score = np.inf
-    previous_refine_warm = None
     refine_summaries = []
 
     for rank, rec in enumerate(coarse_records[:top_k], start=1):
@@ -570,7 +569,7 @@ def optimize(iters: int, seed: int, args):
         print(f"[optimize] refine {rank}/{top_k}: {airfoil['name']}")
         cfg_refine.polar_npz_path = rec["polar_path"]
         cfg_eval.polar_npz_path = rec["polar_path"]
-        warm_start = previous_refine_warm if previous_refine_warm is not None else rec["warm"]
+        warm_start = rec["warm"]
 
         refine_iters = max(iters + 1, 2)
         refine_sig = _opt_cache_signature(airfoil=airfoil, stage_name="refine", cfg_opt=cfg_refine, args=args, iters=refine_iters)
@@ -593,7 +592,6 @@ def optimize(iters: int, seed: int, args):
             if not args.no_opt_cache:
                 _save_stage_cache(refine_cache_path, airfoil, design, result, warm)
 
-        previous_refine_warm = warm
         refine_summaries.append(summary_record(airfoil, design, result, score, "refine", refine_status))
 
         if score < best_score:
