@@ -218,6 +218,9 @@ def _aero_loads_expr(radius, chord_root, chord_tip, twist_root, twist_tip, pitch
     return fn_total, tq_total
 
 
+_GOOD_STATUSES = {"Solve_Succeeded", "Solved_To_Acceptable_Level"}
+
+
 def _default_warm_start(n_nodes: int, cfg: SimConfig):
     return {
         "radius_m": 0.28,
@@ -226,10 +229,10 @@ def _default_warm_start(n_nodes: int, cfg: SimConfig):
         "twist_root_deg": 16.0,
         "twist_tip_deg": 2.0,
         "pitch_collective_deg": 6.0,
-        "t_final": 2.8,
+        "t_final": 7.0,
         "h": np.linspace(cfg.drop_height_m, 0.0, n_nodes),
-        "v": np.linspace(cfg.v0_down_m_s, 8.0, n_nodes),
-        "omega": np.linspace(cfg.omega0_rad_s, 80.0, n_nodes),
+        "v": np.linspace(cfg.v0_down_m_s, 3.0, n_nodes),
+        "omega": np.linspace(cfg.omega0_rad_s, 120.0, n_nodes),
     }
 
 
@@ -310,11 +313,17 @@ def optimize_geometry_for_airfoil(airfoil: dict[str, float], env: Environment, b
     max_rpm = cs.mmax(cs.vertcat(*rpm_values))
     penalty = 0.12 * cs.fmax(impact_speed - 6.0, 0.0) + 0.004 * cs.fmax(max_rpm - 1800.0, 0.0)
     opti.minimize(-(t_final - penalty))
-    sol = opti.solve(max_iter=1000, verbose=False, options={}, behavior_on_failure="return_last")
+    sol = opti.solve(max_iter=4000, verbose=False, options={}, behavior_on_failure="return_last")
+    solve_status = "unknown"
     try:
-        print(f"[optimize]   opti status: {sol.stats()['return_status']}")
+        solve_status = sol.stats().get("return_status", "unknown")
+        print(f"[optimize]   opti status: {solve_status}")
     except Exception:
         pass
+
+    if solve_status not in _GOOD_STATUSES and warm_start is not None:
+        print(f"[optimize]   retrying {airfoil['name']} from default warm start")
+        return optimize_geometry_for_airfoil(airfoil, env, body, cfg_opt, cfg_eval, iters, warm_start=None, stage_name=stage_name)
 
     best_x = np.asarray([float(sol(radius)), float(sol(chord_root)), float(sol(chord_tip)), float(sol(twist_root)), float(sol(twist_tip)), float(sol(pitch))], dtype=float)
     best_design = vec_to_design(best_x, airfoil)
@@ -552,16 +561,19 @@ def optimize(iters: int, seed: int, args):
 
         coarse_summaries.append(summary_record(airfoil, design, result, score, "coarse", coarse_status))
         coarse_records.append({"airfoil": airfoil, "design": design, "result": result, "score": score, "warm": warm, "polar_path": str(polar_path)})
-        previous_warm = warm
+        if coarse_status in _GOOD_STATUSES:
+            previous_warm = warm
 
     coarse_records.sort(key=lambda rec: rec["score"])
     top_k = min(3, len(coarse_records))
     print(f"[optimize] refinement pass on top {top_k} airfoils...")
 
-    best_airfoil = None
-    best_design = None
-    best_result = None
-    best_score = np.inf
+    # Seed from the best coarse result so refinement can only improve, never degrade.
+    best_airfoil = coarse_records[0]["airfoil"]
+    best_design = coarse_records[0]["design"]
+    best_result = coarse_records[0]["result"]
+    best_score = coarse_records[0]["score"]
+    best_polar_path = coarse_records[0]["polar_path"]
     refine_summaries = []
 
     for rank, rec in enumerate(coarse_records[:top_k], start=1):
@@ -592,6 +604,8 @@ def optimize(iters: int, seed: int, args):
             if not args.no_opt_cache:
                 _save_stage_cache(refine_cache_path, airfoil, design, result, warm)
 
+        if score > rec["score"]:
+            print(f"[optimize]   refine degraded vs coarse ({result.fall_time_s:.3f}s < {rec['result'].fall_time_s:.3f}s); coarse result kept as candidate")
         refine_summaries.append(summary_record(airfoil, design, result, score, "refine", refine_status))
 
         if score < best_score:
@@ -599,8 +613,10 @@ def optimize(iters: int, seed: int, args):
             best_design = design
             best_result = result
             best_score = score
+            best_polar_path = rec["polar_path"]
 
     if best_design is not None:
+        cfg_eval.polar_npz_path = best_polar_path
         best_result = simulate_drop(best_design, env, body, cfg_eval)
 
     combined_summaries = coarse_summaries + refine_summaries
@@ -620,5 +636,9 @@ def optimize(iters: int, seed: int, args):
         for path in written_plots:
             print(f"[optimize]   {path}")
 
+    best_coarse_rec = next((r for r in coarse_summaries if r["name"] == best_airfoil["name"]), {})
+    best_status = best_coarse_rec.get("status", "unknown")
+    if best_status not in _GOOD_STATUSES:
+        print(f"[optimize] WARNING: best design ({best_airfoil['name']}) came from a failed solve (status={best_status}); result may be unreliable")
     print(f"[optimize] done in {time.time() - t0:.1f}s")
     return best_airfoil, best_design, best_result
